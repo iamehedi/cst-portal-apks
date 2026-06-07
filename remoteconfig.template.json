@@ -1,0 +1,44 @@
+{
+  "conditions": [],
+  "parameters": {
+    "latest_version": {
+      "defaultValue": {
+        "value": "1"
+      },
+      "description": "Latest build number of the app. Must match pubspec.yaml build number. Update this when releasing a new APK.",
+      "valueType": "NUMBER"
+    },
+    "update_url": {
+      "defaultValue": {
+        "value": "https://github.com/iamehedihsn-a11y/cst-portal-apks/releases/download/v1.2.0/app-release.apk"
+      },
+      "description": "Universal APK download URL (fallback for unknown architectures).",
+      "valueType": "STRING"
+    },
+    "update_url_arm64_v8a": {
+      "defaultValue": {
+        "value": "https://github.com/iamehedihsn-a11y/cst-portal-apks/releases/download/v1.2.0/app-arm64-v8a-release.apk"
+      },
+      "description": "APK download URL for arm64-v8a (most modern phones).",
+      "valueType": "STRING"
+    },
+    "update_url_armeabi_v7a": {
+      "defaultValue": {
+        "value": "https://github.com/iamehedihsn-a11y/cst-portal-apks/releases/download/v1.2.0/app-armeabi-v7a-release.apk"
+      },
+      "description": "APK download URL for armeabi-v7a (older 32-bit phones).",
+      "valueType": "STRING"
+    },
+    "update_url_x86_64": {
+      "defaultValue": {
+        "value": "https://github.com/iamehedihsn-a11y/cst-portal-apks/releases/download/v1.2.0/app-x86_64-release.apk"
+      },
+      "description": "APK download URL for x86_64 (emulators / Chromebooks).",
+      "valueType": "STRING"
+    }
+  },
+  "parameterGroups": {},
+  "version": {
+    "description": "Per-architecture in-app update URLs with GitHub Releases hosting"
+  }
+}

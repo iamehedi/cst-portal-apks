@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter analyze:*)",
+      "Bash(supabase secrets:*)",
+      "Bash(supabase --version)",
+      "Bash(supabase status:*)",
+      "Bash(supabase projects:*)",
+      "Bash(supabase db:*)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(flutter build:*)",
+      "Bash(taskkill:*)",
+      "Bash(C:/src/flutter/bin/flutter clean:*)",
+      "Bash(tasklist)",
+      "Bash(C:/src/flutter/bin/flutter build:*)",
+      "Bash(python3:*)",
+      "Bash(gh:*)",
+      "Bash(flutter pub:*)",
+      "Bash(npm install:*)"
+    ]
+  }
+}

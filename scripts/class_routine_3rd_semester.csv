@@ -1,0 +1,22 @@
+subject code,day,time,title,teacher,acronym,room
+25931,SUN,1:30 - 2:15 PM,Mathematics-III,PT-3,PT-3,2306
+25811,SUN,2:15 - 3:00 PM,Social Science,Md. Manzur Rahman Rabbi,MRR,2306
+28531,SUN,3:00 - 3:45 PM,Application Development Using Python,Md. Shahinul Islam,SI,2306
+25922,SUN,3:45 - 4:30 PM,Physics-II,Md. Abdol Malek PK,AMP,1305
+28533,SUN,4:30 - 6:45 PM (2h 15m),IT Support Services,Kousik Kumar Halder,KKH,1305
+28533,MON,1:30 - 2:15 PM,IT Support Services,Kousik Kumar Halder,KKH,2302
+26831,MON,2:15 - 4:30 PM (2h 15m),Digital Electronics-I,Md. Sium Hosen,SH,5202
+28532,MON,4:30 - 6:45 PM (2h 15m),Computer Graphics Design-II,Md. Shahinul Islam,SI,1308
+25931,TUE,1:30 - 2:15 PM,Mathematics-III,PT-3,PT-3,1305
+28533,TUE,2:15 - 4:30 PM (2h 15m),IT Support Services,Kousik Kumar Halder,KKH,1305
+26831,TUE,4:30 - 5:15 PM,Digital Electronics-I,Md. Sium Hosen,SH,2302
+25922,TUE,5:15 - 6:00 PM,Physics-II,Md. Abdol Malek PK,AMP,2302
+28531,TUE,6:00 - 6:45 PM,Application Development Using Python,Md. Shahinul Islam,SI,2302
+28533,WED,1:30 - 2:15 PM,IT Support Services,Kousik Kumar Halder,KKH,1306
+28531,WED,2:15 - 4:30 PM (2h 15m),Application Development Using Python,Md. Shahinul Islam,SI,1308
+25931,WED,4:30 - 6:45 PM (2h 15m),Mathematics-III,PT-3,PT-3,2303
+25922,THU,1:30 - 3:45 PM (2h 15m),Physics-II,Md. Abdol Malek PK,AMP,2106
+26831,THU,3:45 - 4:30 PM,Digital Electronics-I,Md. Sium Hosen,SH,2303
+25922,THU,4:30 - 5:15 PM,Physics-II,Md. Abdol Malek PK,AMP,2303
+25931,THU,5:15 - 6:00 PM,Mathematics-III,PT-3,PT-3,2303
+25811,THU,6:00 - 6:45 PM,Social Science,Md. Manzur Rahman Rabbi,MRR,2303

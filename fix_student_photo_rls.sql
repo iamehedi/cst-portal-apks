@@ -1,0 +1,2 @@
+-- DEPRECATED: Use fix_profile_photo_rls.sql instead (comprehensive)
+-- This file is kept for reference only.
