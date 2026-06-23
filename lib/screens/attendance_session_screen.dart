@@ -4,7 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import '../core/ble/nearby_service.dart';
+import '../core/db/local_database.dart';
 import '../services/attendance_service.dart';
+import '../services/connectivity_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/theme_provider.dart';
 import '../utils/responsive.dart';
@@ -51,10 +54,17 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
   Timer? _ticker;
   // Stream subscription for live attendees
   StreamSubscription<List<Map<String, dynamic>>>? _attendanceSub;
+  // Poll timer for offline attendance tracking
+  Timer? _pollTimer;
   // Guard: is a token rotation currently in-flight?
   bool _rotating = false;
   // Guard: is a stream retry currently scheduled?
   bool _retryingStream = false;
+  // Whether this session is offline-only (no Supabase session)
+  bool _offlineSession = false;
+
+  // QR + BLE offline bridge
+  bool _bleBridgeActive = false;
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
@@ -67,8 +77,10 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
   void dispose() {
     _ticker?.cancel();
     _attendanceSub?.cancel();
+    _pollTimer?.cancel();
     _manualIdCtrl.dispose();
     _manualNameCtrl.dispose();
+    _stopQrBleBridge();
     super.dispose();
   }
 
@@ -76,11 +88,17 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
   Future<void> _initSession() async {
     try {
       if (widget.existingSessionId != null) {
-        // Resume existing session
-        final session = await AttendanceService.getSession(widget.existingSessionId!)
-            .timeout(const Duration(seconds: 10), onTimeout: () => null);
+        // Resume existing session — try Supabase first, then local
+        Map<String, dynamic>? session;
+        if (ConnectivityService().isOnline.value) {
+          session = await AttendanceService.getSession(widget.existingSessionId!)
+              .timeout(const Duration(seconds: 10), onTimeout: () => null);
+        }
+        // Try local DB if Supabase failed
+        session ??= await LocalDatabase.getQrSession(widget.existingSessionId!);
         if (session == null) throw Exception('Session not found or has ended');
         _sessionId = session['id']?.toString();
+        _offlineSession = session['sync_status'] == 'pending';
 
         // Use existing token if still fresh
         final existingToken = session['current_token']?.toString();
@@ -98,15 +116,16 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
           await _rotateToken();
         }
       } else {
-        // Create new session
-        final session = await AttendanceService.createSession(
+        // Create new session (offline-first)
+        final session = await AttendanceService.createSessionOfflineFirst(
           department: widget.department,
           subject: widget.subject,
           semester: widget.semester,
           classDate: widget.classDate,
           classTime: widget.classTime,
-        ).timeout(const Duration(seconds: 10));
+        );
         _sessionId = session['id']?.toString();
+        _offlineSession = session['offline'] == true || session['sync_status'] == 'pending';
         if (_sessionId == null) throw Exception('Session creation failed: no ID returned');
         await _rotateToken();
       }
@@ -114,10 +133,22 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
       // Start the single ticker — runs every second for the session lifetime
       _startTicker();
       _subscribeToAttendance();
-      if (mounted) setState(() => _initializing = false);
+      if (mounted) {
+        setState(() => _initializing = false);
+        _startQrBleBridge();
+      }
     } catch (e) {
       _cleanup();
-      if (mounted) setState(() { _error = friendlyError(e); _initializing = false; });
+      if (mounted) {
+        final msg = e.toString().toLowerCase();
+        // Session creation handles offline natively — don't show network errors
+        final friendly = msg.contains('socketexception') ||
+                msg.contains('failed host lookup') ||
+                msg.contains('network')
+            ? 'Could not create session. Please try again.'
+            : friendlyError(e);
+        setState(() { _error = friendly; _initializing = false; });
+      }
     }
   }
 
@@ -153,6 +184,14 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
     } catch (_) {
       // DB update failed or timed out — token only updated locally
     }
+    // Persist token locally for offline resume
+    if (_offlineSession || !ConnectivityService().isOnline.value) {
+      await LocalDatabase.updateQrSessionToken(
+        _sessionId!,
+        token,
+        DateTime.now().toUtc().toIso8601String(),
+      );
+    }
     if (!mounted) { _rotating = false; return; }
     setState(() {
       _currentToken = token;
@@ -167,23 +206,51 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
     return List.generate(6, (_) => chars[rng.nextInt(chars.length)]).join();
   }
 
-  // ── Attendance Stream ────────────────────────────────────────────────────
+  // ── Attendance Stream / Poll ────────────────────────────────────────────
   void _subscribeToAttendance() {
     if (_sessionId == null) return;
     _attendanceSub?.cancel();
+    _pollTimer?.cancel();
     _retryingStream = false;
-    _attendanceSub = AttendanceService.getAttendanceStream(_sessionId!).listen(
-      (data) {
-        if (mounted) setState(() => _attendees = data);
-      },
-      onError: (_) {
-        if (!mounted || _retryingStream) return;
-        _retryingStream = true;
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted && _sessionId != null) _subscribeToAttendance();
-        });
-      },
-    );
+
+    if (_offlineSession || !ConnectivityService().isOnline.value) {
+      // Offline: poll local attendance records every 3 seconds
+      _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        _pollLocalAttendance();
+      });
+      _pollLocalAttendance();
+    } else {
+      // Online: real-time Supabase stream
+      _attendanceSub = AttendanceService.getAttendanceStream(_sessionId!).listen(
+        (data) {
+          if (mounted) setState(() => _attendees = data);
+        },
+        onError: (_) {
+          if (!mounted || _retryingStream) return;
+          _retryingStream = true;
+          Future.delayed(const Duration(seconds: 3), () {
+            if (mounted && _sessionId != null) _subscribeToAttendance();
+          });
+        },
+      );
+    }
+  }
+
+  Future<void> _pollLocalAttendance() async {
+    if (!mounted || _sessionId == null) return;
+    try {
+      final allRecords = await LocalDatabase.getAllLocalAttendance();
+      final sessionRecords = allRecords
+          .where((r) => r['session_id']?.toString() == _sessionId)
+          .map((r) => {
+                'student_id': r['student_id'],
+                'student_name': r['student_name'],
+                'method': r['method'] ?? 'manual',
+                'marked_at': r['scanned_at'] ?? r['created_at'],
+              })
+          .toList();
+      if (mounted) setState(() => _attendees = sessionRecords);
+    } catch (_) {}
   }
 
   // ── End Session ──────────────────────────────────────────────────────────
@@ -207,16 +274,23 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
     if (confirm != true || !mounted) return;
 
     _cleanup();
-    try {
-      final ended = await AttendanceService.endSession(_sessionId!);
-      if (!ended) {
-        // Session wasn't found in DB — already ended or deleted
-        if (mounted) showAppSnackbar(context, 'Session was already ended');
-      } else if (mounted) {
-        showAppSnackbar(context, 'Session ended');
+    if (_offlineSession || !ConnectivityService().isOnline.value) {
+      // Offline: close locally
+      await LocalDatabase.closeQrSession(_sessionId!);
+      if (mounted) showAppSnackbar(context, 'Session ended (offline — will sync when online)');
+    } else {
+      try {
+        final ended = await AttendanceService.endSession(_sessionId!);
+        if (!ended) {
+          if (mounted) showAppSnackbar(context, 'Session was already ended');
+        } else if (mounted) {
+          showAppSnackbar(context, 'Session ended');
+        }
+      } catch (e) {
+        // Fallback: close locally
+        await LocalDatabase.closeQrSession(_sessionId!);
+        if (mounted) showAppSnackbar(context, 'Session ended (offline — will sync when online)');
       }
-    } catch (e) {
-      if (mounted) showAppSnackbar(context, 'Failed to end session: ${friendlyError(e)}', isError: true);
     }
     if (mounted) Navigator.pop(context);
   }
@@ -231,7 +305,7 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
     }
     setState(() => _submittingManual = true);
     try {
-      final result = await AttendanceService.validateAndMarkAttendance(
+      final result = await AttendanceService.markAttendanceOfflineFirst(
         sessionId: _sessionId,
         token: _currentToken,
         studentId: id,
@@ -361,12 +435,104 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
     return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
   }
 
+  // ── QR + BLE Offline Bridge ────────────────────────────────────────────
+  /// Start a lightweight Nearby hub so students can deliver QR check-ins
+  /// via Bluetooth when both devices are offline.
+  Future<void> _startQrBleBridge() async {
+    if (_sessionId == null) return;
+    final ok = await NearbyService().startQrBridge(
+      sessionId: _sessionId!,
+      onQrOfflineCheckIn: _onQrOfflineCheckIn,
+    );
+    if (mounted) {
+      setState(() {
+        _bleBridgeActive = ok;
+      });
+    }
+  }
+
+  /// Called when a student delivers a QR offline check-in via BLE.
+  /// Validates the session token, then auto-accepts (saves as "present"
+  /// with method "qr_ble") so the Live Attendance list updates instantly.
+  Future<void> _onQrOfflineCheckIn(Map<String, dynamic> payload) async {
+    final token = (payload['session_token'] as String?)?.trim().toUpperCase();
+    final studentId = (payload['student_id'] as String?)?.trim();
+    final studentName = (payload['student_name'] as String?)?.trim();
+    final timestamp = payload['timestamp'] as String?;
+
+    // Validate required fields
+    if (token == null || studentId == null || studentName == null) {
+      debugPrint('[QrBridge] Invalid payload (missing fields)');
+      return;
+    }
+
+    // Validate token matches the current session token
+    if (token != _currentToken) {
+      debugPrint('[QrBridge] Token mismatch: got $token, expected $_currentToken');
+      return;
+    }
+
+    // Validate token freshness (within 35 seconds to allow for BLE latency)
+    if (timestamp != null) {
+      final parsed = DateTime.tryParse(timestamp);
+      if (parsed != null) {
+        final age = DateTime.now().toUtc().difference(parsed).inSeconds;
+        if (age > 35) {
+          debugPrint('[QrBridge] Token expired: $age seconds old');
+          return;
+        }
+      }
+    }
+
+    // Auto-accept: save to local attendance as present
+    final now = DateTime.now().toUtc().toIso8601String();
+    final record = {
+      'id': 'qr_ble_${studentId}_${now.hashCode}',
+      'student_id': studentId,
+      'student_name': studentName,
+      'class': widget.subject.replaceAll(RegExp(r'\d'), '').trim(),
+      'subject': widget.subject,
+      'session_id': _sessionId,
+      'status': 'present',
+      'scanned_at': now,
+      'sync_status': 'pending',
+      'retry_count': 0,
+      'token': token,
+      'method': 'qr_ble',
+      'device_id': widget.profile['id']?.toString() ?? '',
+      'created_at': now,
+    };
+
+    // Guard: skip duplicate check-in for the same student within this session
+    if (_attendees.any((a) => a['student_id']?.toString() == studentId)) {
+      debugPrint('[QrBridge] Duplicate: $studentName ($studentId) already checked in');
+      return;
+    }
+
+    try {
+      await LocalDatabase.insertAttendanceLocal(record);
+      debugPrint('[QrBridge] Auto-accepted $studentName ($studentId) via QR+BLE');
+    } catch (e) {
+      debugPrint('[QrBridge] Failed to save attendance: $e');
+    }
+  }
+
+  /// Stop the QR bridge hub when the session ends or screen disposes.
+  Future<void> _stopQrBleBridge() async {
+    if (!_bleBridgeActive) return;
+    _bleBridgeActive = false;
+    await NearbyService().stopQrBridge();
+  }
+
   // ── Cleanup ──────────────────────────────────────────────────────────────
   void _cleanup() {
     _ticker?.cancel();
     _ticker = null;
     _attendanceSub?.cancel();
     _attendanceSub = null;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _stopQrBleBridge();
   }
 
   // ── Build ────────────────────────────────────────────────────────────────
@@ -473,6 +639,32 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
               fontWeight: FontWeight.w700,
             ),
           ),
+          // BLE bridge status indicator
+          if (!_initializing && _sessionId != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6, bottom: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _bleBridgeActive ? c.accent3 : c.accentOrange,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _bleBridgeActive ? 'Bluetooth sync active' : 'BT sync unavailable',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: _bleBridgeActive ? c.accent3 : c.accentOrange,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           const SizedBox(height: 16),
           Container(
             padding: const EdgeInsets.all(16),
@@ -579,7 +771,7 @@ class _AttendanceSessionScreenState extends State<AttendanceSessionScreen> {
               final a = _attendees[i];
               final isQr = a['method'] == 'qr';
               final time = a['marked_at'] != null
-                  ? DateFormat('hh:mm:ss a').format(DateTime.parse(a['marked_at']).toLocal())
+                  ? DateFormat('HH:mm:ss').format(DateTime.parse(a['marked_at']).toLocal())
                   : '';
 
               return Container(

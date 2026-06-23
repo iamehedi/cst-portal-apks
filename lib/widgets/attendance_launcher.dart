@@ -2,11 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../screens/attendance_session_screen.dart';
 import '../services/attendance_service.dart';
+import '../services/cache_service.dart';
+import '../services/connectivity_service.dart';
 import '../services/routine_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/theme_provider.dart';
 import '../utils/responsive.dart';
 import '../utils/page_transitions.dart';
+import '../core/sync/sync_manager.dart';
+import '../features/attendance/presentation/sync_status_screen.dart';
+import '../features/ble/presentation/teacher_ble_session_screen.dart';
 import 'common.dart';
 import 'theme_picker.dart';
 
@@ -22,7 +27,7 @@ class AttendanceLauncher extends StatefulWidget {
 class _AttendanceLauncherState extends State<AttendanceLauncher> {
   String _department = 'CST';
   String? _subject;
-  int _semester = 3;
+  final int _semester = 3;
   List<Map<String, dynamic>> _allRoutineSlots = [];
   List<Map<String, dynamic>> _todaySlots = [];
   bool _loadingSubjects = true;
@@ -73,22 +78,38 @@ class _AttendanceLauncherState extends State<AttendanceLauncher> {
   @override
   void initState() {
     super.initState();
+    _loadFromCache();
     _loadSubjects();
     _checkActiveSession();
   }
 
+  void _loadFromCache() {
+    final cacheKey = CacheService.routineKey(_semester);
+    if (CacheService.isStale(cacheKey)) return;
+    final cached = CacheService.loadList(cacheKey);
+    if (cached == null || cached.isEmpty) return;
+    setState(() {
+      _allRoutineSlots = cached;
+      _filterSlotsForDate();
+      _loadingSubjects = false;
+    });
+  }
+
   Future<void> _loadSubjects() async {
+    if (!ConnectivityService().isOnline.value) return;
     setState(() => _loadingSubjects = true);
     try {
       final routines = await RoutineService.fetch(_semester);
       if (!mounted) return;
+      final rows = routines.map((slot) => slot.toRow()).toList();
+      CacheService.saveList(CacheService.routineKey(_semester), rows);
       setState(() {
-        _allRoutineSlots = routines.map((slot) => slot.toRow()).toList();
+        _allRoutineSlots = rows;
         _filterSlotsForDate();
         _loadingSubjects = false;
       });
     } catch (_) {
-      if (mounted) setState(() => _loadingSubjects = false);
+      if (mounted) setState(() { _filterSlotsForDate(); _loadingSubjects = false; });
     }
   }
 
@@ -112,6 +133,10 @@ class _AttendanceLauncherState extends State<AttendanceLauncher> {
   }
 
   Future<void> _checkActiveSession() async {
+    if (!ConnectivityService().isOnline.value) {
+      if (mounted) setState(() => _checkingSession = false);
+      return;
+    }
     final gen = ++_sessionCheckGeneration;
     try {
       final userId = SupabaseService.currentUser?.id;
@@ -190,6 +215,45 @@ class _AttendanceLauncherState extends State<AttendanceLauncher> {
         backgroundColor: c.bg,
         title: Text('Attendance', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.white)),
         actions: [
+          // Pending sessions badge
+          ValueListenableBuilder<int>(
+            valueListenable: SyncManager().sessionPendingCount,
+            builder: (ctx, sessionCount, _) {
+              if (sessionCount <= 0) return const SizedBox();
+              return Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: GestureDetector(
+                  onTap: () => Navigator.push(context, buildCupertinoRoute(const SyncStatusScreen())),
+                  child: AppBadge(label: 'Sessions: $sessionCount', color: c.accentOrange),
+                ),
+              );
+            },
+          ),
+          // Total pending count badge (attendance records)
+          ValueListenableBuilder<int>(
+            valueListenable: SyncManager().pendingCount,
+            builder: (ctx, count, _) {
+              if (count <= 0) return const SizedBox();
+              final sessionCount = SyncManager().sessionPendingCount.value;
+              final recordCount = count - sessionCount;
+              if (recordCount <= 0) return const SizedBox();
+              return Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: GestureDetector(
+                  onTap: () => Navigator.push(context, buildCupertinoRoute(const SyncStatusScreen())),
+                  child: AppBadge(label: '$recordCount pending', color: c.accent3),
+                ),
+              );
+            },
+          ),
+          IconButton(
+            icon: Icon(Icons.sync, color: c.accent),
+            tooltip: 'Sync now',
+            onPressed: () async {
+              final count = await SyncManager().manualSync();
+              if (context.mounted) showAppSnackbar(context, 'Synced $count records');
+            },
+          ),
           IconButton(
             icon: Icon(Icons.palette_outlined, color: c.accent),
             tooltip: 'Theme',
@@ -278,6 +342,51 @@ class _AttendanceLauncherState extends State<AttendanceLauncher> {
                   ],
                 ),
               ),
+              const SizedBox(height: 24),
+            ],
+
+            // Smart Attendance (BLE)
+            if (_activeSession == null && !_checkingSession) ...[
+              const SectionTitle(title: 'Smart Attendance', icon: Icons.bluetooth_searching, centered: true),
+              const SizedBox(height: 16),
+              AppCard(
+                borderColor: c.accent.withValues(alpha: 0.2),
+                child: Column(
+                  children: [
+                    Container(
+                      width: 56, height: 56,
+                      decoration: BoxDecoration(
+                        color: c.accent.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Icon(Icons.bluetooth_searching, color: c.accent, size: 28),
+                    ),
+                    const SizedBox(height: 12),
+                    Text('Start Smart Attendance Session', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: c.white)),
+                    const SizedBox(height: 6),
+                    Text('Students discover via Bluetooth — no internet required', style: TextStyle(color: c.muted, fontSize: 12), textAlign: TextAlign.center),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: PrimaryButton(
+                            label: 'Smart Attendance',
+                            icon: Icons.bluetooth_searching,
+                            onPressed: () => Navigator.push(
+                              context,
+                              buildCupertinoRoute(TeacherBleSessionScreen(
+                                profile: widget.profile,
+                                initialSubject: _subject,
+                                initialSemester: _semester,
+                              )),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ).animate().fadeIn(duration: 400.ms).slideY(begin: 0.08, end: 0, duration: 400.ms),
               const SizedBox(height: 24),
             ],
 

@@ -74,6 +74,11 @@ async function sendFcmV1(
   try {
     const accessToken = await getFcmAccessToken();
 
+    // Map notification type to Android channel registered in the Flutter app
+    const channelId = (notifType === "exam" || notifType === "reminder")
+      ? "reminder_channel"
+      : "notice_channel";
+
     const response = await fetch(
       `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
       {
@@ -90,9 +95,16 @@ async function sendFcmV1(
               body: body.substring(0, 200),
             },
             android: {
+              priority: "high",
+              ttl: "86400s",
               notification: {
+                channel_id: channelId,
                 sound: "default",
                 click_action: "FLUTTER_NOTIFICATION_CLICK",
+                notification_priority: "PRIORITY_HIGH",
+                default_sound: true,
+                default_vibrate_timings: true,
+                default_light_settings: true,
               },
             },
             data: {
@@ -191,11 +203,10 @@ serve(async (req: Request) => {
     // ── Step 4: Extract fields ───────────────────────────────────────────
     const isNotes = table === "notes";
     const title = (record.title ?? record.note_title ?? "New update") as string;
-    const description = (record.description ?? record.subject ?? "") as string;
+    const description = (isNotes ? record.note_content : record.description) ?? record.subject ?? "" as string;
     const notifType = isNotes ? "note" : "notice";
-    const excludeUserId = (record.user_id as string) ?? undefined;
 
-    console.log(`[NOTIFY] table=${table} title="${title}" type=${notifType} excludeUserId=${excludeUserId}`);
+    console.log(`[NOTIFY] table=${table} title="${title}" type=${notifType}`);
 
     if (!title || title.trim() === "") {
       console.error(`[NOTIFY] Title is empty`);
@@ -241,16 +252,9 @@ serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    let query = supabase
+    const { data: tokens, error } = await supabase
       .from("device_tokens")
       .select("device_token, user_id");
-
-    if (excludeUserId) {
-      query = query.neq("user_id", excludeUserId);
-      console.log(`[TOKENS] Excluding user_id=${excludeUserId}`);
-    }
-
-    const { data: tokens, error } = await query;
 
     if (error) {
       console.error(`[TOKENS] Query error: ${error.message}`);

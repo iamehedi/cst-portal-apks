@@ -299,8 +299,10 @@ class PdfExport {
     pw.Font font,
     pw.Font fontBold,
     String value,
-    String label,
-  ) {
+    String label, {
+    PdfColor? color,
+  }) {
+    final valueColor = color ?? PdfColors.black;
     return pw.Container(
       width: 100,
       padding: const pw.EdgeInsets.all(12),
@@ -316,7 +318,7 @@ class PdfExport {
             style: pw.TextStyle(
               font: fontBold,
               fontSize: 20,
-              color: PdfColors.black,
+              color: valueColor,
             ),
           ),
           pw.SizedBox(height: 2),
@@ -784,9 +786,7 @@ class PdfExport {
                       _cell(_recordSubject(records[i]), font, PdfColors.black),
                       _cell(_recordDateTime(records[i]), font, PdfColors.grey700),
                       _cell(_recordMethod(records[i]), font,
-                          _recordMethod(records[i]) == 'QR'
-                              ? PdfColor.fromHex('#2E7D32')
-                              : PdfColor.fromHex('#E65100')),
+                          _recordMethodColor(records[i])),
                     ],
                   ),
                 ],
@@ -810,6 +810,13 @@ class PdfExport {
     return session?['subject']?.toString() ?? '';
   }
   static String _recordDateTime(Map<String, dynamic> r) {
+    final session = r['attendance_sessions'] as Map<String, dynamic>?;
+    final classDate = session?['class_date']?.toString() ?? '';
+    final classTime = session?['class_time']?.toString() ?? '';
+    if (classDate.isNotEmpty && classTime.isNotEmpty) {
+      return '$classDate, $classTime';
+    }
+    if (classDate.isNotEmpty) return classDate;
     final markedAt = r['marked_at']?.toString() ?? '';
     if (markedAt.isEmpty) return '';
     try {
@@ -819,8 +826,173 @@ class PdfExport {
       return markedAt;
     }
   }
-  static String _recordMethod(Map<String, dynamic> r) =>
-      (r['method']?.toString() ?? '').toUpperCase();
+  static String _recordMethod(Map<String, dynamic> r) {
+    final method = (r['method']?.toString() ?? '').toUpperCase();
+    if (method == 'BLE') {
+      final status = r['_ble_status']?.toString() ?? 'present';
+      return 'BLE - ${status[0].toUpperCase()}${status.substring(1)}';
+    }
+    return method;
+  }
+
+  static PdfColor _recordMethodColor(Map<String, dynamic> r) {
+    final method = (r['method']?.toString() ?? '').toUpperCase();
+    if (method != 'BLE') return PdfColor.fromHex('#2E7D32');
+    final status = r['_ble_status']?.toString() ?? '';
+    switch (status) {
+      case 'present':
+        return PdfColor.fromHex('#2E7D32');
+      case 'rejected':
+        return PdfColor.fromHex('#CC0000');
+      case 'disconnected':
+        return PdfColor.fromHex('#E65100');
+      default:
+        return PdfColor.fromHex('#FF8F00');
+    }
+  }
+
+  // ── BLE Session PDF ──────────────────────────────────────────────────────
+
+  /// Generate a PDF report for a BLE attendance session.
+  /// Shows session info (subject, semester) and student roster with status.
+  static Future<Uint8List> generateBleSessionPdf({
+    required String subject,
+    required int semester,
+    required List<({String studentId, String studentName, String status})> roster,
+  }) async {
+    final pdf = pw.Document();
+    final font = pw.Font.helvetica();
+    final fontBold = pw.Font.helveticaBold();
+    final now = DateTime.now();
+
+    final present = roster.where((s) => s.status == 'present').length;
+    final rejected = roster.where((s) => s.status == 'rejected').length;
+    final pending = roster.where((s) => s.status == 'pending' || s.status == 'disconnected').length;
+
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(24),
+        header: (context) => pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text('CST Portal - Smart Attendance Report',
+                style: pw.TextStyle(font: fontBold, fontSize: 8, color: PdfColors.grey600)),
+            pw.Text('Page ${context.pageNumber}',
+                style: pw.TextStyle(font: font, fontSize: 7, color: PdfColors.grey400)),
+          ],
+        ),
+        footer: (context) => pw.Center(
+          child: pw.Text('CST Department Portal - Confidential',
+              style: pw.TextStyle(font: font, fontSize: 7, color: PdfColors.grey400)),
+        ),
+        build: (context) => [
+          pw.Center(
+            child: pw.Text('Smart Attendance Report',
+                style: pw.TextStyle(font: fontBold, fontSize: 18, color: PdfColors.black)),
+          ),
+          pw.SizedBox(height: 4),
+          pw.Center(
+            child: pw.Text('Generated: ${DateFormat('dd MMM yyyy, hh:mm a').format(now)}',
+                style: pw.TextStyle(font: font, fontSize: 9, color: PdfColors.grey700)),
+          ),
+          pw.Divider(height: 20, thickness: 0.5, color: PdfColors.grey400),
+
+          pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceEvenly,
+            children: [
+              _summaryBox(font, fontBold, subject, 'Subject'),
+              _summaryBox(font, fontBold, 'Semester $semester', 'Semester'),
+            ],
+          ),
+          pw.SizedBox(height: 20),
+
+          pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceEvenly,
+            children: [
+              _summaryBox(font, fontBold, '${roster.length}', 'Total'),
+              _summaryBox(font, fontBold, '$present', 'Present',
+                  color: PdfColor.fromHex('#2E7D32')),
+              _summaryBox(font, fontBold, '$rejected', 'Rejected',
+                  color: PdfColor.fromHex('#CC0000')),
+              _summaryBox(font, fontBold, '$pending', 'Pending',
+                  color: PdfColor.fromHex('#E65100')),
+            ],
+          ),
+          pw.SizedBox(height: 20),
+
+          pw.Text('Student Roster',
+              style: pw.TextStyle(font: fontBold, fontSize: 13, color: PdfColors.black)),
+          pw.SizedBox(height: 8),
+
+          if (roster.isEmpty)
+            pw.Center(
+              child: pw.Text('No students found.',
+                  style: pw.TextStyle(font: font, fontSize: 10, color: PdfColors.grey600)),
+            )
+          else
+            pw.Table(
+              border: pw.TableBorder.all(color: PdfColor.fromHex('#E0E0E0'), width: 0.5),
+              children: [
+                pw.TableRow(
+                  decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFF333333)),
+                  children: [
+                    _cell('#', fontBold, PdfColors.white, isHeader: true),
+                    _cell('Name', fontBold, PdfColors.white, isHeader: true),
+                    _cell('ID', fontBold, PdfColors.white, isHeader: true),
+                    _cell('Status', fontBold, PdfColors.white, isHeader: true),
+                  ],
+                ),
+                for (int i = 0; i < roster.length; i++) ...[
+                  pw.TableRow(
+                    decoration: pw.BoxDecoration(
+                      color: i % 2 == 0 ? PdfColor.fromHex('#F8F9FA') : PdfColors.white,
+                    ),
+                    children: [
+                      _cell('${i + 1}', font, PdfColors.black),
+                      _cell(roster[i].studentName, fontBold, PdfColors.black),
+                      _cell(roster[i].studentId, font, PdfColors.black),
+                      _cell(
+                        _bleStatusLabel(roster[i].status),
+                        fontBold,
+                        _bleStatusColor(roster[i].status),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+        ],
+      ),
+    );
+    return pdf.save();
+  }
+
+  static String _bleStatusLabel(String status) {
+    switch (status) {
+      case 'present':
+        return 'Present';
+      case 'rejected':
+        return 'Rejected';
+      case 'disconnected':
+        return 'Disconnected';
+      default:
+        return 'Pending';
+    }
+  }
+
+  static PdfColor _bleStatusColor(String status) {
+    switch (status) {
+      case 'present':
+        return PdfColor.fromHex('#2E7D32');
+      case 'rejected':
+        return PdfColor.fromHex('#CC0000');
+      case 'disconnected':
+        return PdfColor.fromHex('#E65100');
+      default:
+        return PdfColor.fromHex('#FF8F00');
+    }
+  }
 
   // ── Share / Save ───────────────────────────────────────────────────────────
 

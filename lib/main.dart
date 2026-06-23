@@ -5,8 +5,10 @@ import 'package:flutter/foundation.dart' show kIsWeb, kReleaseMode, kDebugMode;
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:provider/provider.dart';
+import 'package:workmanager/workmanager.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'services/supabase_service.dart';
 import 'services/update_service.dart';
 import 'services/cache_service.dart';
@@ -15,6 +17,10 @@ import 'services/reminder_service.dart';
 import 'services/error_service.dart';
 import 'services/analytics_service.dart';
 import 'services/connectivity_service.dart';
+import 'core/db/local_database.dart';
+import 'core/sync/sync_manager.dart';
+import 'features/ble/providers/ble_session_provider.dart';
+import 'features/ble/providers/ble_attendance_provider.dart';
 import 'firebase_options.dart';
 import 'utils/theme_provider.dart';
 import 'screens/splash_screen.dart';
@@ -28,6 +34,17 @@ import 'screens/exam_routine_screen.dart';
 
 // নোটিফিকেশন ক্লিক রুট হ্যান্ডেল করার জন্য গ্লোবাল নেভিগেটর কি
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+// WorkManager background task callback — must be top-level
+@pragma('vm:entry-point')
+void workmanagerCallbackDispatcher() {
+  Workmanager().executeTask((taskName, inputData) async {
+    if (taskName == 'attendanceSync') {
+      await SyncManager.syncBackgroundTask();
+    }
+    return Future.value(true);
+  });
+}
 
 /// Simple error fallback shown when the Flutter framework catches a build error.
 /// This uses NO theme, NO MaterialApp, and NO providers — safe to show even
@@ -81,12 +98,55 @@ Future<void> main() async {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   }
 
-  // ── STEP 2: Cache + Supabase ইনিশিয়ালাইজেশন (parallel) ─────────────────────
+  // ── STEP 2: Initialize WorkManager + all core services (parallel) ──────────
+  try {
+    await Workmanager().initialize(workmanagerCallbackDispatcher, isInDebugMode: kDebugMode);
+  } catch (_) {}
+
   await Future.wait([
     CacheService.init(),
     SupabaseService.initialize(),
     ConnectivityService().init(),
+    LocalDatabase.database,    // Initialize SQLite
+    SyncManager.initialize(),  // Start sync background tasks
   ]);
+
+  // ── STEP 3: Create Android notification channels early ──
+  // Must happen before any FCM message arrives. The edge function sends
+  // with channel_id "notice_channel"; if the channel doesn't exist on
+  // Android 8+, the notification is silently dropped.
+  if (!kIsWeb) {
+    try {
+      final plugin = FlutterLocalNotificationsPlugin();
+      const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+      await plugin.initialize(const InitializationSettings(android: androidInit));
+      final androidPlugin = plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidPlugin != null) {
+        await androidPlugin.createNotificationChannel(
+          const AndroidNotificationChannel(
+            'notice_channel',
+            'Important Notices',
+            description: 'This channel is used for institute notice boards.',
+            importance: Importance.max,
+            playSound: true,
+          ),
+        );
+        await androidPlugin.createNotificationChannel(
+          const AndroidNotificationChannel(
+            'reminder_channel',
+            'Exam & Class Reminders',
+            description: 'This channel is used for exam routine alerts.',
+            importance: Importance.high,
+            playSound: true,
+          ),
+        );
+      }
+    } catch (_) {}
+  }
+
+  // ── STEP 4: BLE/Nearby singletons are lazy — created on first use from BLE screens.
+  // No eager initialization here to avoid MissingPluginException on web.
 
   // Firebase + FCM init deferred to after the first frame
   // so the splash screen shows immediately. See _CSTPortalAppState._deferredInit().
@@ -191,8 +251,12 @@ class _CSTPortalAppState extends State<CSTPortalApp>
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider.value(
-      value: _themeProvider,
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: _themeProvider),
+        ChangeNotifierProvider(create: (_) => BleSessionProvider()),
+        ChangeNotifierProvider(create: (_) => BleAttendanceProvider()),
+      ],
       child: Consumer<ThemeProvider>(
         builder: (context, themeProv, _) {
           // Sync system chrome immediately on each theme change

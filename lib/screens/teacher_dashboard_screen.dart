@@ -10,6 +10,7 @@ import '../utils/theme_provider.dart';
 import '../utils/responsive.dart';
 import '../widgets/common.dart';
 import '../widgets/theme_picker.dart';
+import '../features/attendance/presentation/sync_status_screen.dart';
 import 'notices_screen.dart';
 import 'notes_screen.dart';
 import 'students_screen.dart';
@@ -317,6 +318,8 @@ class _TeacherOverviewState extends State<_TeacherOverview> {
                     buildCupertinoRoute(const AttendanceReportScreen()))),
                 _TeacherQuickCard(icon: Icons.person, label: 'My Profile', color: c.accentOrange.withValues(alpha: 0.75), index: 8,
                   onTap: () => _navigateToTab(context, 5)),
+                _TeacherQuickCard(icon: Icons.cloud_sync, label: 'Sync Status', color: c.accent.withValues(alpha: 0.75), index: 9,
+                  onTap: () => Navigator.push(context, buildCupertinoRoute(const SyncStatusScreen()))),
               ],
             ),
             const SizedBox(height: 24),

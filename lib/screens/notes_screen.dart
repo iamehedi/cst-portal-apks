@@ -265,10 +265,6 @@ class _NotesScreenState extends State<NotesScreen> {
       ),
       body: Column(
         children: [
-          ConnectivityBanners(
-            isOffline: _model.isOffline,
-            onRefresh: () => _model.refresh(),
-          ),
           // ── Search bar ──
           ListenableBuilder(
             listenable: _model,

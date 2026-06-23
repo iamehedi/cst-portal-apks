@@ -241,10 +241,6 @@ class _ExamRoutineScreenState extends State<ExamRoutineScreen> {
       ),
       body: Column(
         children: [
-          ConnectivityBanners(
-            isOffline: _model.isOffline,
-            onRefresh: () => _model.refresh(),
-          ),
           Expanded(
             child: ListenableBuilder(
         listenable: _model,

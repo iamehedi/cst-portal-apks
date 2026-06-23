@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:intl/intl.dart';
+import '../core/db/local_database.dart';
 import '../services/attendance_service.dart';
 import '../services/cache_service.dart';
+import '../services/connectivity_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/pdf_export.dart';
 import '../utils/theme_provider.dart';
@@ -18,6 +22,43 @@ String _dateKey(String? iso) {
   } catch (_) {
     return iso;
   }
+}
+
+/// Convert [t] (either "HH:mm" or an ISO timestamp) to minutes since midnight.
+/// Returns null if neither format parses.
+int? _timeToMinutes(String t) {
+  if (t.isEmpty) return null;
+  // Try "HH:mm" or "HH:mm:ss" first
+  final parts = t.split(':');
+  if (parts.length >= 2) {
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h != null && m != null) return h * 60 + m;
+  }
+  // Fall back to full ISO timestamp
+  try {
+    final dt = DateTime.parse(t).toLocal();
+    return dt.hour * 60 + dt.minute;
+  } catch (_) {
+    return null;
+  }
+}
+
+String _sessionDateKey(Map<String, dynamic> record) {
+  final session = record['attendance_sessions'] as Map<String, dynamic>?;
+  final classDate = session?['class_date']?.toString() ?? '';
+  if (classDate.isNotEmpty) {
+    try {
+      final parts = classDate.split('-');
+      if (parts.length == 3) {
+        return '${parts[0]}-${parts[1].padLeft(2, '0')}-${parts[2].padLeft(2, '0')}';
+      }
+      return classDate;
+    } catch (_) {
+      return classDate;
+    }
+  }
+  return _dateKey(record['marked_at']?.toString());
 }
 
 Map<String, String> _studentRow(Map<String, dynamic> record, Map<String, String> rollToReg) {
@@ -76,20 +117,80 @@ class _AttendanceReportModel extends ChangeNotifier {
     }
   }
 
+  Future<void> _mergeBlePending() async {
+    final bleSessions = await LocalDatabase.getAllBleSessions();
+    for (final session in bleSessions) {
+      final sessionId = session['id']?.toString() ?? '';
+      if (sessionId.isEmpty) continue;
+
+      final pendingRecords = await LocalDatabase.getBlePendingBySession(sessionId);
+      final finalRecords = await LocalDatabase.getBleFinalBySession(sessionId);
+
+      // Add pending records that are NOT yet finalized (no sync yet)
+      for (final p in pendingRecords) {
+        final sid = p['student_id']?.toString() ?? '';
+        if (sid.isEmpty) continue;
+        final hasFinal = finalRecords.any((f) => f['student_id']?.toString() == sid);
+        final alreadySynced = records.any((r) =>
+          r['student_id']?.toString() == sid &&
+          (r['attendance_sessions'] as Map<String, dynamic>?)?['id']?.toString() ==
+              (session['unified_session_id']?.toString() ?? sessionId)
+        );
+        if (hasFinal) continue;
+        if (alreadySynced) continue;
+        records.add({
+          'id': 'ble_pending_${p['id']}',
+          'student_id': sid,
+          'student_name': p['student_name']?.toString() ?? sid,
+          'method': 'ble',
+          'marked_at': p['created_at']?.toString() ?? DateTime.now().toUtc().toIso8601String(),
+          'attendance_sessions': {
+            'id': session['unified_session_id']?.toString() ?? sessionId,
+            'subject': session['subject'],
+            'semester': session['semester'],
+            'department': session['department'],
+            'teacher_id': session['teacher_id'],
+            'class_date': null,
+            'class_time': null,
+            'created_at': session['created_at'],
+          },
+          '_ble_status': p['status']?.toString() ?? 'pending',
+        });
+      }
+    }
+  }
+
   Future<void> fetchData() async {
+    // If offline, load from cache + local BLE data without network calls
+    if (!ConnectivityService().isOnline.value) {
+      final cached = CacheService.loadList('cache_attendance_records');
+      if (cached != null && cached.isNotEmpty) {
+        records = cached;
+      }
+      await _mergeBlePending();
+      initialLoading = false;
+      isOffline = true;
+      notifyListeners();
+      return;
+    }
+
     try {
       final results = await Future.wait([AttendanceService.getAttendanceReport(), SupabaseService.getStudents()]);
       records = results[0];
       initialLoading = false;
       isOffline = false;
       CacheService.saveList('cache_attendance_records', records);
-      final students = results[1] as List<Map<String, dynamic>>;
+      final students = results[1];
       rollToRegistration = {};
       for (final s in students) {
         final roll = s['roll']?.toString();
         final reg = s['registration']?.toString();
         if (roll != null && roll.isNotEmpty) rollToRegistration[roll] = reg ?? '\u2014';
       }
+
+      // Merge BLE pending-only records
+      await _mergeBlePending();
+
       notifyListeners();
     } catch (_) {
       initialLoading = false;
@@ -110,26 +211,67 @@ class _AttendanceReportModel extends ChangeNotifier {
   }
 
   List<String> get dateKeys {
-    final keys = records.map((r) => _dateKey(r['marked_at']?.toString())).toSet();
+    final keys = records.map((r) => _sessionDateKey(r)).toSet();
     final sorted = keys.toList()..sort((a, b) => b.compareTo(a));
     return sorted;
   }
 
   List<Map<String, dynamic>> recordsForDate(String dateKey) {
-    return records.where((r) => _dateKey(r['marked_at']?.toString()) == dateKey).toList();
+    return records.where((r) => _sessionDateKey(r) == dateKey).toList();
   }
 
   List<String> subjectsForDate(String dateKey) {
-    return recordsForDate(dateKey)
+    final subjects = recordsForDate(dateKey)
         .map((r) => (r['attendance_sessions'] as Map<String, dynamic>?)?['subject']?.toString() ?? '')
-        .where((s) => s.isNotEmpty).toSet().toList()..sort();
+        .where((s) => s.isNotEmpty).toSet().toList();
+
+    // Build a lookup of subject -> sortable time string (class_time or earliest marked_at)
+    final timeMap = <String, String>{};
+    for (final s in subjects) {
+      final recs = recordsForSubject(dateKey, s);
+      String bestTime = '';
+      for (final r in recs) {
+        final session = r['attendance_sessions'] as Map<String, dynamic>?;
+        final t = session?['class_time']?.toString() ?? '';
+        if (t.isNotEmpty) { bestTime = t; break; }
+        final m = r['marked_at']?.toString() ?? '';
+        if (m.isNotEmpty && (bestTime.isEmpty || m.compareTo(bestTime) < 0)) {
+          bestTime = m;
+        }
+      }
+      timeMap[s] = bestTime;
+    }
+
+    subjects.sort((a, b) {
+      final ta = _timeToMinutes(timeMap[a] ?? '');
+      final tb = _timeToMinutes(timeMap[b] ?? '');
+      if (ta != null && tb != null) return ta.compareTo(tb);
+      if (ta != null) return -1;
+      if (tb != null) return 1;
+      return a.compareTo(b);
+    });
+    return subjects;
   }
 
   List<Map<String, dynamic>> recordsForSubject(String dateKey, String subject) {
-    return recordsForDate(dateKey).where((r) {
+    final result = recordsForDate(dateKey).where((r) {
       final session = r['attendance_sessions'] as Map<String, dynamic>?;
       return session?['subject']?.toString() == subject;
     }).toList();
+    result.sort((a, b) {
+      final sa = a['attendance_sessions'] as Map<String, dynamic>?;
+      final sb = b['attendance_sessions'] as Map<String, dynamic>?;
+      final ta = _timeToMinutes(sa?['class_time']?.toString() ?? '');
+      final tb = _timeToMinutes(sb?['class_time']?.toString() ?? '');
+      if (ta != null && tb != null) return ta.compareTo(tb);
+      if (ta != null) return -1;
+      if (tb != null) return 1;
+      final ma = _timeToMinutes(a['marked_at']?.toString() ?? '');
+      final mb = _timeToMinutes(b['marked_at']?.toString() ?? '');
+      if (ma != null && mb != null) return ma.compareTo(mb);
+      return (a['marked_at']?.toString() ?? '').compareTo(b['marked_at']?.toString() ?? '');
+    });
+    return result;
   }
 
   List<Map<String, dynamic>> uniqueStudentsForSubject(String dateKey, String subject) {
@@ -146,7 +288,7 @@ class _AttendanceReportModel extends ChangeNotifier {
 
   List<String> get availableMonths {
     final months = records.map((r) {
-      final dk = _dateKey(r['marked_at']?.toString());
+      final dk = _sessionDateKey(r);
       return dk.length >= 7 ? dk.substring(0, 7) : '';
     }).where((m) => m.isNotEmpty).toSet().toList();
     months.sort((a, b) => b.compareTo(a));
@@ -157,7 +299,7 @@ class _AttendanceReportModel extends ChangeNotifier {
 
   List<Map<String, dynamic>> recordsForMonths(List<String> monthKeys) {
     return records.where((r) {
-      final dk = _dateKey(r['marked_at']?.toString());
+      final dk = _sessionDateKey(r);
       return monthKeys.any((m) => dk.startsWith(m));
     }).toList();
   }
@@ -167,7 +309,7 @@ class _AttendanceReportModel extends ChangeNotifier {
   }
 
   List<Map<String, dynamic>> recordsForDateKeys(List<String> keys) {
-    return records.where((r) => keys.contains(_dateKey(r['marked_at']?.toString()))).toList();
+    return records.where((r) => keys.contains(_sessionDateKey(r))).toList();
   }
 
   List<Map<String, String>> studentsForDateKeys(List<String> keys) {
@@ -193,7 +335,7 @@ class _AttendanceReportModel extends ChangeNotifier {
 
   int studentCountForMonth(String monthKey) {
     final matched = records.where((r) {
-      final dk = _dateKey(r['marked_at']?.toString());
+      final dk = _sessionDateKey(r);
       return dk.startsWith(monthKey);
     }).toList();
     return _deduplicate(matched).length;
@@ -237,11 +379,25 @@ class AttendanceReportScreen extends StatefulWidget {
 
 class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
   late final _model = _AttendanceReportModel();
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
 
   @override
-  void initState() { super.initState(); _model.loadCached(); _model.fetchData(); }
+  void initState() {
+    super.initState();
+    _model.loadCached(); _model.fetchData();
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      if (results.any((r) => r != ConnectivityResult.none) && _model.isOffline) {
+        _model.refresh();
+      }
+    });
+  }
+
   @override
-  void dispose() { _model.dispose(); super.dispose(); }
+  void dispose() {
+    _connectivitySub?.cancel();
+    _model.dispose();
+    super.dispose();
+  }
 
   Future<void> _exportDetailed({
     required String title,
@@ -319,6 +475,15 @@ class _AttendanceReportScreenState extends State<AttendanceReportScreen> {
 
   Widget _buildBody(ThemeColors c) {
     final m = _model;
+
+    return Column(
+      children: [
+        Expanded(child: _buildBodyContent(c, m)),
+      ],
+    );
+  }
+
+  Widget _buildBodyContent(ThemeColors c, _AttendanceReportModel m) {
     if (m.initialLoading) {
       return ListView.builder(
         padding: EdgeInsets.all(Responsive.screenPadding(context)), itemCount: 6,
@@ -560,7 +725,7 @@ class _SubjectDetailScreenState extends State<_SubjectDetailScreen> {
     } catch (e) { if (context.mounted) showAppSnackbar(context, friendlyError(e), isError: true); }
   }
 
-  Future<void> _deleteRecord(String recordId) async {
+  Future<void> _deleteRecord(String recordId, Map<String, dynamic> record) async {
     final c = context.colorsOf;
     final confirm = await showDialog<bool>(
       context: context,
@@ -594,12 +759,49 @@ class _SubjectDetailScreenState extends State<_SubjectDetailScreen> {
 
     setState(() => _deletingRecords.add(recordId));
     try {
-      await AttendanceService.deleteAttendanceRecord(recordId);
+      final isBleLegacy = recordId.startsWith('ble_');
+      final isBleUnified = !isBleLegacy &&
+          (record['method']?.toString() == 'ble');
+      final session = record['attendance_sessions'] as Map<String, dynamic>?;
+      final studentId = record['student_id']?.toString() ?? '';
+
+      if (isBleLegacy) {
+        // Old-style BLE record (local merge ID like 'ble_123')
+        final sessionId = session?['id']?.toString() ?? '';
+        if (recordId.startsWith('ble_pending_')) {
+          await AttendanceService.deleteBleRecord(recordId);
+        } else if (sessionId.isNotEmpty && studentId.isNotEmpty) {
+          await AttendanceService.deleteBleFinalBySessionAndStudent(sessionId, studentId);
+        } else {
+          await AttendanceService.deleteBleRecord(recordId);
+        }
+      } else if (isBleUnified) {
+        // BLE record from unified attendance_records (UUID ID)
+        // Delete from attendance_records AND legacy ble_final_attendance
+        await AttendanceService.deleteAttendanceRecord(recordId);
+        // Also try legacy: find matching BLE session + final record
+        final unifiedSessionId = session?['id']?.toString() ?? '';
+        if (unifiedSessionId.isNotEmpty && studentId.isNotEmpty) {
+          final sessions = await LocalDatabase.getAllBleSessions();
+          for (final s in sessions) {
+            if (s['unified_session_id']?.toString() == unifiedSessionId) {
+              final bleSid = s['id']?.toString() ?? '';
+              if (bleSid.isNotEmpty) {
+                await AttendanceService.deleteBleFinalBySessionAndStudent(bleSid, studentId);
+              }
+              break;
+            }
+          }
+        }
+      } else {
+        // Regular QR/manual record
+        await AttendanceService.deleteAttendanceRecord(recordId);
+      }
+
       if (!mounted) return;
       // Remove from central model (notifies listeners + clears cache)
       widget.model.removeRecordById(recordId);
       setState(() {
-        // _records re-synced from model via _onModelChanged
         _deletingRecords.remove(recordId);
       });
       if (mounted) showAppSnackbar(context, '\u2705 Record deleted');
@@ -662,7 +864,7 @@ class _SubjectDetailScreenState extends State<_SubjectDetailScreen> {
     if (markedAt.isNotEmpty) {
       try {
         final dt = DateTime.parse(markedAt).toLocal();
-        time = DateFormat('hh:mm a').format(dt);
+        time = DateFormat('HH:mm').format(dt);
       } catch (_) {
         time = markedAt;
       }
@@ -739,11 +941,11 @@ class _SubjectDetailScreenState extends State<_SubjectDetailScreen> {
                       child: CircularProgressIndicator(strokeWidth: 2, color: c.muted),
                     ),
                   )
-                : Material(
+                  : Material(
                     color: Colors.transparent,
                     child: InkWell(
                       borderRadius: BorderRadius.circular(10),
-                      onTap: () => _deleteRecord(recordId),
+                      onTap: () => _deleteRecord(recordId, record),
                       child: Container(
                         width: 36, height: 36,
                         decoration: BoxDecoration(

@@ -2,12 +2,16 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import '../core/ble/nearby_service.dart';
+import '../core/sync/sync_manager.dart';
 import '../services/attendance_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/theme_provider.dart';
 import '../utils/responsive.dart';
 import '../utils/page_transitions.dart';
 import '../widgets/common.dart';
+import '../features/attendance/presentation/sync_status_screen.dart';
+import '../features/ble/presentation/student_ble_listener_screen.dart';
 import 'student_attendance_history_screen.dart';
 
 class StudentAttendanceScreen extends StatefulWidget {
@@ -34,7 +38,7 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
   String get _studentId => (widget.profile['roll'] ?? '').toString();
   String get _studentName => (widget.profile['name'] ?? 'Student').toString();
 
-  Future<void> _submitAttendance(String token, String method) async {
+  Future<void> _submitAttendance(String token, String method, {String? sessionId}) async {
     if (token.trim().length < 6) {
       showAppSnackbar(context, 'Please enter a valid 6-character token', isError: true);
       return;
@@ -43,8 +47,8 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
     setState(() => _submitting = true);
 
     try {
-      final result = await AttendanceService.validateAndMarkAttendance(
-        sessionId: null, // looked up by token server-side
+      final result = await AttendanceService.markAttendanceOfflineFirst(
+        sessionId: null,
         token: token.trim().toUpperCase(),
         studentId: _studentId,
         studentName: _studentName,
@@ -55,9 +59,17 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
 
       if (result['success'] == true) {
         _tokenCtrl.clear();
-        // Show snackbar first — always reliable even if dialog has animation issues
-        showAppSnackbar(context, '\u2705 Attendance marked successfully!');
-        _showSuccessDialog(result);
+        final isOffline = result['offline'] == true;
+        if (isOffline && sessionId != null) {
+          // Offline + session ID available → try BLE bridge
+          await _showBleBridgeDialog(sessionId, token.trim().toUpperCase());
+        } else if (isOffline) {
+          showAppSnackbar(context, 'Saved offline. Will sync when online.');
+          _showOfflineSuccessDialog();
+        } else {
+          showAppSnackbar(context, 'Attendance marked successfully!');
+          _showSuccessDialog(result);
+        }
       } else {
         final errMsg = result['error']?.toString() ?? 'Unknown error';
         showAppSnackbar(context, errMsg, isError: true);
@@ -144,6 +156,168 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
     return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
   }
 
+  /// Try to deliver the QR offline check-in via BLE to the teacher's device.
+  /// Shows a connecting dialog while attempting, then replaces it with
+  /// either a success or fallback dialog based on the result.
+  Future<void> _showBleBridgeDialog(String sessionId, String token) async {
+    final c = context.colors;
+
+    // Show connecting dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.bg2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: c.accent.withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 3,
+                    color: c.accent,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Connecting via Bluetooth...',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Sending your attendance to the\nteacher\'s device using Bluetooth.',
+                style: TextStyle(color: c.muted, fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ).animate()
+          .scale(begin: const Offset(0.8, 0.8), duration: 350.ms, curve: Curves.easeOutBack)
+          .fadeIn(duration: 250.ms),
+    );
+
+    // Try BLE bridge in the background
+    final success = await NearbyService().startQrDiscovery(
+      studentName: _studentName,
+      studentId: _studentId,
+      sessionId: sessionId,
+      sessionToken: token,
+    );
+
+    await NearbyService().stopAll();
+
+    if (!mounted) return;
+
+    // Pop connecting dialog and show result
+    Navigator.pop(context);
+
+    if (success) {
+      _showBleSuccessDialog();
+    } else {
+      _showOfflineSuccessDialog();
+    }
+  }
+
+  /// Simple success dialog after BLE bridge delivered the check-in.
+  void _showBleSuccessDialog() {
+    final c = context.colors;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.bg2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: c.accent3.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.bluetooth_connected, color: Colors.green, size: 40),
+              ),
+              const SizedBox(height: 20),
+              Text(
+                'Teacher Received Check-in!',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: c.white),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Your attendance was delivered via Bluetooth.\nThe teacher can see you in Live Attendance now.',
+                style: TextStyle(color: c.muted, fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              PrimaryButton(
+                label: 'Done',
+                icon: Icons.check,
+                onPressed: () => Navigator.pop(ctx),
+              ),
+            ],
+          ),
+        ),
+      ).animate()
+          .scale(begin: const Offset(0.8, 0.8), duration: 350.ms, curve: Curves.easeOutBack)
+          .fadeIn(duration: 250.ms),
+    );
+  }
+
+  void _showOfflineSuccessDialog() {
+    final c = context.colors;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: c.bg2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: c.accentOrange.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.wifi_off, color: c.accentOrange, size: 40),
+              ),
+              const SizedBox(height: 20),
+              Text('Saved Offline', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: c.white)),
+              const SizedBox(height: 8),
+              Text('Attendance recorded locally.\nIt will sync automatically when online.', style: TextStyle(color: c.muted, fontSize: 13), textAlign: TextAlign.center),
+              const SizedBox(height: 24),
+              PrimaryButton(
+                label: 'Done',
+                icon: Icons.check,
+                onPressed: () => Navigator.pop(ctx),
+              ),
+            ],
+          ),
+        ),
+      ).animate().scale(begin: const Offset(0.8, 0.8), duration: 350.ms, curve: Curves.easeOutBack).fadeIn(duration: 250.ms),
+    );
+  }
+
   void _showErrorDialog(String error) {
     final c = context.colors;
     showDialog(
@@ -203,7 +377,8 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
     if (parts.length == 2 && parts[1].length == 6) {
       _scannerController?.stop();
       setState(() => _scannerActive = false);
-      await _submitAttendance(parts[1], 'qr');
+      final sessionId = parts[0];
+      await _submitAttendance(parts[1], 'qr', sessionId: sessionId);
     } else {
       showAppSnackbar(context, 'Invalid QR code format', isError: true);
     }
@@ -229,6 +404,21 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
         backgroundColor: c.bg,
         foregroundColor: c.white,
         title: const Text('Mark Attendance', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        actions: [
+          ValueListenableBuilder<int>(
+            valueListenable: SyncManager().pendingCount,
+            builder: (ctx, count, _) {
+              if (count <= 0) return const SizedBox();
+              return Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: GestureDetector(
+                  onTap: () => Navigator.push(context, buildCupertinoRoute(const SyncStatusScreen())),
+                  child: AppBadge(label: '$count pending', color: c.accentOrange),
+                ),
+              );
+            },
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: EdgeInsets.all(Responsive.screenPadding(context)),
@@ -319,6 +509,34 @@ class _StudentAttendanceScreenState extends State<StudentAttendanceScreen> {
                 ],
               ),
             ).animate().fadeIn(duration: 400.ms).slideY(begin: 0.08, end: 0, duration: 400.ms),
+            const SizedBox(height: 24),
+
+            // Smart Auto-Detect
+            const SectionTitle(title: 'Smart Attendance', icon: Icons.bluetooth, centered: true),
+            const SizedBox(height: 14),
+            AppCard(
+              borderColor: c.accent.withValues(alpha: 0.2),
+              child: Column(
+                children: [
+                  Icon(Icons.bluetooth_searching, size: 36, color: c.accent),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Automatically detect nearby class sessions',
+                    style: TextStyle(color: c.muted, fontSize: 12),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  PrimaryButton(
+                    label: 'Start Smart Scan',
+                    icon: Icons.bluetooth,
+                    onPressed: () => Navigator.push(
+                      context,
+                      buildCupertinoRoute(StudentBleListenerScreen(profile: widget.profile)),
+                    ),
+                  ),
+                ],
+              ),
+            ).animate().fadeIn(duration: 400.ms, delay: 50.ms).slideY(begin: 0.08, end: 0, duration: 400.ms, delay: 50.ms),
             const SizedBox(height: 24),
 
             // Manual Token Entry

@@ -16,6 +16,27 @@
     <!-- Camera for QR attendance scanning -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- BLE for beacon-based offline attendance (100% offline, NO WiFi required).
+         This is a PURE BLE attendance system. The Nearby Connections API is used for
+         data transfer over BLE/Bluetooth, NOT WiFi.
+         
+         Android < 12 still requires ACCESS_FINE_LOCATION for BLE scanning.
+         This is an OS requirement, NOT app WiFi usage. The app NEVER uses WiFi
+         for attendance logic. WiFi state changes are IGNORED for attendance flow.
+         
+         See Bug 2 fix: NEARBY_WIFI_DEVICES permission removed to prevent
+         any WiFi involvement in the attendance process. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- ACCESS_FINE_LOCATION is required by Android < 12 for BLE scanning.
+         It is NOT used for WiFi. The app does NOT use WiFi for attendance. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
     <!-- Exact alarms for scheduled class/exam reminders (Android 12+) -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- Auto-granted exact alarm permission (Android 13+ fallback) -->
@@ -70,5 +91,8 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="notice_channel" />
     </application>
 </manifest>

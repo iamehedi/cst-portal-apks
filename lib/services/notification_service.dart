@@ -20,6 +20,14 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
   await localNotifications.initialize(const InitializationSettings(android: androidInit));
 
+  // Ensure channels exist in background isolate (Android 8+ requirement)
+  final androidPlugin = localNotifications.resolvePlatformSpecificImplementation<
+      AndroidFlutterLocalNotificationsPlugin>();
+  if (androidPlugin != null) {
+    await androidPlugin.createNotificationChannel(NotificationService._kNoticeChannel);
+    await androidPlugin.createNotificationChannel(NotificationService._kReminderChannel);
+  }
+
   NotificationService._showLocalNotification(message, localNotifications);
 }
 
@@ -30,6 +38,7 @@ class NotificationService {
 
   final FirebaseMessaging _fcm = FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _localNotifications = FlutterLocalNotificationsPlugin();
+  StreamSubscription<String>? _tokenRefreshSub;
 
   // নোটিফিকেশনের জন্য কাস্টম চ্যানেল তৈরি (গাইডের স্টেপ ১ অনুযায়ী)
   static const AndroidNotificationChannel _kNoticeChannel = AndroidNotificationChannel(
@@ -100,6 +109,16 @@ class NotificationService {
         _routeFromMessage(context, initialMessage.data);
       });
     }
+
+    // ── FCM token refresh listener ─────────────────────────────────────
+    // Firebase may rotate the token at any time (reinstall, security, expiry).
+    // Without this listener, the Supabase webhook sends to a stale token.
+    _tokenRefreshSub = _fcm.onTokenRefresh.listen((newToken) {
+      debugPrint('[FCM] Token refreshed, saving to Supabase...');
+      saveDeviceToken().catchError((e) {
+        debugPrint('[FCM] saveDeviceToken on refresh failed: $e');
+      });
+    });
 
     // ডিভাইস টোকেন ডাটাবেজে সেভ করা (non-blocking — won't crash profile load)
     saveDeviceToken().catchError((e) {
@@ -242,6 +261,10 @@ class NotificationService {
             repeatWeekly ? DateTimeComponents.dayOfWeekAndTime : null,
       );
     }
+  }
+
+  void dispose() {
+    _tokenRefreshSub?.cancel();
   }
 
   /// ❌ আইডি অনুযায়ী শিডিউল করা নোটিফিকেশন বাতিল করার মেথড

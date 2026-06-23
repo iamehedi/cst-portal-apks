@@ -163,10 +163,6 @@ class _TeachersScreenState extends State<TeachersScreen> {
       ),
       body: Column(
         children: [
-          ConnectivityBanners(
-            isOffline: _isOffline,
-            onRefresh: () => _refresh(),
-          ),
           Container(
             color: c.bg2,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),

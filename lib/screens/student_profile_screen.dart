@@ -45,7 +45,10 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
     final c = context.colors;
     final name = _student['name'] ?? '';
     final canViewDetails = widget.isAdmin || widget.isTeacher;
-    final qrData = 'Name: $name\nRoll: ${_student['roll'] ?? ''}\nReg: ${_student['registration'] ?? ''}\nEmail: ${_student['email'] ?? ''}';
+    final studentId = _student['id']?.toString() ?? '';
+    final qrData = studentId.isNotEmpty
+        ? '{"v":1,"id":"$studentId"}'
+        : 'Name: $name\nRoll: ${_student['roll'] ?? ''}\nReg: ${_student['registration'] ?? ''}\nEmail: ${_student['email'] ?? ''}';
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -178,7 +181,7 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
                   children: [
                     Text('Student QR Code', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: c.white)),
                     const SizedBox(height: 4),
-                    Text('Scan for quick identification', style: TextStyle(color: c.muted, fontSize: 12)),
+                    Text('Teacher can scan this to mark attendance', style: TextStyle(color: c.muted, fontSize: 12)),
                     const SizedBox(height: 16),
                     Container(
                       padding: const EdgeInsets.all(12),
@@ -188,6 +191,10 @@ class _StudentProfileScreenState extends State<StudentProfileScreen> {
                       ),
                       child: QrImageView(data: qrData, version: QrVersions.auto, size: 180, backgroundColor: Colors.white),
                     ),
+                    if (studentId.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text('ID: $studentId', style: TextStyle(color: c.muted, fontSize: 10)),
+                    ],
                   ],
                 ),
               ).animate().fadeIn(duration: 400.ms, delay: 200.ms, curve: Curves.easeOut).slideY(begin: 12, end: 0, duration: 400.ms, delay: 200.ms, curve: Curves.easeOut),

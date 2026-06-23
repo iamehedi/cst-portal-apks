@@ -621,10 +621,6 @@ class _RoutineScreenState extends State<RoutineScreen> {
               ),
             ),
           ),
-          ConnectivityBanners(
-            isOffline: _isOffline,
-            onRefresh: () => _refresh(),
-          ),
           // Off Days Banner
           if (_offDays.any((d) {
             final today = DateTime.now().toIso8601String().substring(0, 10);

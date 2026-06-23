@@ -66,34 +66,41 @@ async function sendFcmV1(
   try {
     const accessToken = await getFcmAccessToken();
 
-    const response = await fetch(
-      `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          message: {
-            token: deviceToken,
-            notification: {
-              title,
-              body: body.substring(0, 200),
-            },
-            android: {
+      const response = await fetch(
+        `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            message: {
+              token: deviceToken,
               notification: {
-                sound: "default",
-                click_action: "FLUTTER_NOTIFICATION_CLICK",
+                title,
+                body: body.substring(0, 200),
+              },
+              android: {
+                priority: "high",
+                ttl: "86400s",
+                notification: {
+                  channel_id: "reminder_channel",
+                  sound: "default",
+                  click_action: "FLUTTER_NOTIFICATION_CLICK",
+                  notification_priority: "PRIORITY_HIGH",
+                  default_sound: true,
+                  default_vibrate_timings: true,
+                  default_light_settings: true,
+                },
+              },
+              data: {
+                type: "exam",
               },
             },
-            data: {
-              type: "exam",
-            },
-          },
-        }),
-      },
-    );
+          }),
+        },
+      );
 
     if (!response.ok) {
       const errorText = await response.text();

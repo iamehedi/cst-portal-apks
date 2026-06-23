@@ -51,6 +51,16 @@ class _StudentsScreenState extends State<StudentsScreen> {
       _initialLoading = false;
       }
     }
+    if (!CacheService.isStale(CacheService.profilesKey)) {
+      final cached = CacheService.loadList(CacheService.profilesKey);
+      if (cached != null && cached.isNotEmpty) {
+      setState(() {
+        _profiles = cached;
+        _profilesLoaded = true;
+        _initialLoading = false;
+      });
+      }
+    }
   }
 
   @override
@@ -158,14 +168,23 @@ class _StudentsScreenState extends State<StudentsScreen> {
     _profilesSub = SupabaseService.getApprovedStudentProfilesStream().listen((data) {
       if (mounted) {
         // Filter client-side for approved status (stream filter API limitation)
-        setState(() => _profiles = data.where((p) => p['status'] == 'approved').toList());
+        final approved = data.where((p) => p['status'] == 'approved').toList();
+        setState(() => _profiles = approved);
         _profilesLoaded = true;
+        CacheService.saveList(CacheService.profilesKey, approved);
         checkReady();
       }
     }, onError: (e) {
       if (mounted) {
         _profilesLoaded = true;
-        setState(() {});
+        // Fall back to cache if stream fails
+        if (_profiles.isEmpty) {
+          final cached = CacheService.loadList(CacheService.profilesKey);
+          if (cached != null && cached.isNotEmpty) {
+            setState(() => _profiles = cached);
+          }
+        }
+        setState(() => _isOffline = true);
         checkReady();
         showAppSnackbar(context, friendlyError(e), isError: true);
       }
@@ -306,10 +325,6 @@ class _StudentsScreenState extends State<StudentsScreen> {
       ),
       body: Column(
         children: [
-          ConnectivityBanners(
-            isOffline: _isOffline,
-            onRefresh: () => _refresh(),
-          ),
           Container(
             color: c.bg2,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),

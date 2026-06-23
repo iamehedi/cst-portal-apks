@@ -152,6 +152,7 @@ class _HomeTabState extends State<_HomeTab> {
   List<Map<String, dynamic>> _allNotes = [];
   List<Map<String, dynamic>> _allEvents = [];
   bool _initialLoading = true;
+  bool _isOffline = false;
   StreamSubscription<List<Map<String, dynamic>>>? _noticesSub;
   StreamSubscription<List<Map<String, dynamic>>>? _notesSub;
   StreamSubscription<List<Map<String, dynamic>>>? _eventsSub;
@@ -191,30 +192,34 @@ class _HomeTabState extends State<_HomeTab> {
         _recentNotices = data.take(3).toList();
         _initialLoading = false;
         _recomputeUnread();
-        if (mounted) setState(() {});
+      if (mounted) setState(() { _isOffline = false; });
         CacheService.saveList(CacheService.noticesKey, data);
       }
     }, onError: (_) {
-      if (mounted) setState(() => _initialLoading = false);
+      if (mounted) setState(() { _initialLoading = false; _isOffline = true; });
     });
 
     _notesSub = SupabaseService.getNotesStream(semester: sem).listen((data) {
       if (mounted) {
         _allNotes = data;
         _recomputeUnread();
-        if (mounted) setState(() {});
+        if (mounted) setState(() { _isOffline = false; });
         CacheService.saveList(CacheService.notesKey(sem), data);
       }
-    }, onError: (_) {});
+    }, onError: (_) {
+      if (mounted) setState(() => _isOffline = true);
+    });
 
     _eventsSub = SupabaseService.getEventsStream().listen((data) {
       if (mounted) {
         _allEvents = data;
         _recomputeUnread();
-        if (mounted) setState(() {});
+        if (mounted) setState(() { _isOffline = false; });
         CacheService.saveList(CacheService.eventsKey, data);
       }
-    }, onError: (_) {});
+    }, onError: (_) {
+      if (mounted) setState(() => _isOffline = true);
+    });
   }
 
   @override

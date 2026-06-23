@@ -1,20 +1,24 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'connectivity_service.dart';
 
 class CacheService {
   static late SharedPreferences _prefs;
 
-  /// Maximum age for cached data before it's considered stale.
-  /// Set to 15 minutes — data older than this will show shimmer while refreshing.
-  static const Duration maxCacheAge = Duration(minutes: 15);
+  /// Maximum age for cached data before it's considered stale when online.
+  /// Extended to 24 hours — data survives a full school day.
+  /// When offline, stale check is bypassed entirely.
+  static const Duration maxCacheAge = Duration(hours: 24);
 
   static Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
   }
 
-  /// Check if a cache entry is stale (older than [maxCacheAge]).
-  /// Returns `true` if the entry doesn't exist, is too old, or has no timestamp.
+  /// Check if a cache entry is stale.
+  /// When offline, always returns false (data is never stale).
+  /// When online, returns true if data is older than [maxCacheAge] or missing.
   static bool isStale(String key) {
+    if (!ConnectivityService().isOnline.value) return false;
     final ts = lastUpdated(key);
     if (ts == null) return true;
     return DateTime.now().difference(ts) > maxCacheAge;
@@ -62,6 +66,16 @@ class CacheService {
     return null;
   }
 
+  /// Invalidate all cached data by removing all timestamp keys.
+  /// Forces the next [isStale] check to return `true` for every cache entry,
+  /// so screens will re-fetch fresh data from Supabase.
+  static Future<void> invalidateAllCaches() async {
+    final keys = _prefs.getKeys().where((k) => k.endsWith('_ts')).toList();
+    for (final key in keys) {
+      await _prefs.remove(key);
+    }
+  }
+
   // ─── Utilities ───────────────────────────────────────────────
 
   static Future<void> remove(String key) async {
@@ -93,6 +107,7 @@ class CacheService {
   static const eventsKey = 'cache_events';
   static const offDaysKey = 'cache_off_days';
   static const studentsKey = 'cache_students';
+  static const profilesKey = 'cache_profiles';
   static const teachersKey = 'cache_teachers';
   static String routineKey(int semester) => 'cache_routine_sem$semester';
 

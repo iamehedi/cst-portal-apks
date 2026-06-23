@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:intl/intl.dart';
+import '../services/cache_service.dart';
+import '../services/connectivity_service.dart';
 import '../services/supabase_service.dart';
 import '../utils/theme_provider.dart';
 import '../widgets/common.dart';
@@ -116,6 +118,7 @@ class _EventsTab extends StatefulWidget {
 class _EventsTabState extends State<_EventsTab> {
   List<Map<String, dynamic>> _events = [];
   bool _loading = true;
+  bool _isOffline = false;
   StreamSubscription<List<Map<String, dynamic>>>? _eventsSub;
 
   // Add form state
@@ -137,8 +140,26 @@ class _EventsTabState extends State<_EventsTab> {
   @override
   void initState() {
     super.initState();
+    _loadCached();
     _subscribe();
   }
+
+  void _loadCached() {
+    if (!CacheService.isStale(CacheService.eventsKey)) {
+      final cached = CacheService.loadList(CacheService.eventsKey);
+      if (cached != null && cached.isNotEmpty) {
+        final today = DateTime.now().toIso8601String().substring(0, 10);
+        final filtered = cached.where((e) {
+          final date = e['event_date']?.toString() ?? '';
+          return date.compareTo(today) >= 0;
+        }).toList()..sort((a, b) => (a['event_date'] ?? '').toString().compareTo(b['event_date']?.toString() ?? ''));
+        _events = filtered;
+        _loading = false;
+      }
+    }
+  }
+
+  bool get _canEditOnline => widget.canEdit && ConnectivityService().isOnline.value;
 
   @override
   void dispose() {
@@ -160,9 +181,16 @@ class _EventsTabState extends State<_EventsTab> {
         return date.compareTo(today) >= 0;
       }).toList()
         ..sort((a, b) => (a['event_date'] ?? '').toString().compareTo(b['event_date']?.toString() ?? ''));
-      setState(() { _events = filtered; _loading = false; });
+      CacheService.saveList(CacheService.eventsKey, data);
+      setState(() { _events = filtered; _loading = false; _isOffline = false; });
     }, onError: (_) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          if (_events.isEmpty) _isOffline = true;
+          else _isOffline = !ConnectivityService().isOnline.value;
+        });
+      }
     });
   }
 
@@ -319,7 +347,7 @@ class _EventsTabState extends State<_EventsTab> {
 
     return Column(
       children: [
-        if (widget.canEdit) ...[
+        if (_canEditOnline) ...[
           // Add button
           Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
@@ -818,6 +846,7 @@ class _OffDaysTab extends StatefulWidget {
 class _OffDaysTabState extends State<_OffDaysTab> {
   List<Map<String, dynamic>> _offDays = [];
   bool _loading = true;
+  bool _isOffline = false;
   StreamSubscription<List<Map<String, dynamic>>>? _offDaysSub;
 
   // Add form state
@@ -830,8 +859,21 @@ class _OffDaysTabState extends State<_OffDaysTab> {
   @override
   void initState() {
     super.initState();
+    _loadCached();
     _subscribe();
   }
+
+  void _loadCached() {
+    if (!CacheService.isStale(CacheService.offDaysKey)) {
+      final cached = CacheService.loadList(CacheService.offDaysKey);
+      if (cached != null && cached.isNotEmpty) {
+        _offDays = cached;
+        _loading = false;
+      }
+    }
+  }
+
+  bool get _canEditOnline => widget.canEdit && ConnectivityService().isOnline.value;
 
   @override
   void dispose() {
@@ -851,9 +893,16 @@ class _OffDaysTabState extends State<_OffDaysTab> {
         return end.compareTo(today) >= 0;
       }).toList()
         ..sort((a, b) => (a['start_date'] ?? '').toString().compareTo(b['start_date']?.toString() ?? ''));
-      setState(() { _offDays = filtered; _loading = false; });
+      CacheService.saveList(CacheService.offDaysKey, data);
+      setState(() { _offDays = filtered; _loading = false; _isOffline = false; });
     }, onError: (_) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          if (_offDays.isEmpty) _isOffline = true;
+          else _isOffline = !ConnectivityService().isOnline.value;
+        });
+      }
     });
   }
 
@@ -972,7 +1021,7 @@ class _OffDaysTabState extends State<_OffDaysTab> {
           ),
         ),
         // Add button
-        Padding(
+        if (_canEditOnline) Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
           child: Row(
             children: [
@@ -1349,6 +1398,7 @@ class _ExamsTab extends StatefulWidget {
 class _ExamsTabState extends State<_ExamsTab> {
   List<Map<String, dynamic>> _exams = [];
   bool _loading = true;
+  bool _isOffline = false;
   StreamSubscription<List<Map<String, dynamic>>>? _examsSub;
 
   // Add form state
@@ -1373,8 +1423,21 @@ class _ExamsTabState extends State<_ExamsTab> {
   @override
   void initState() {
     super.initState();
+    _loadCached();
     _subscribe();
   }
+
+  void _loadCached() {
+    if (!CacheService.isStale(CacheService.examsKey)) {
+      final cached = CacheService.loadList(CacheService.examsKey);
+      if (cached != null && cached.isNotEmpty) {
+        _exams = cached;
+        _loading = false;
+      }
+    }
+  }
+
+  bool get _canEditOnline => widget.canEdit && ConnectivityService().isOnline.value;
 
   @override
   void dispose() {
@@ -1390,9 +1453,16 @@ class _ExamsTabState extends State<_ExamsTab> {
     _examsSub?.cancel();
     _examsSub = SupabaseService.getExamsStream().listen((data) {
       if (!mounted) return;
-      setState(() { _exams = data; _loading = false; });
+      CacheService.saveList(CacheService.examsKey, data);
+      setState(() { _exams = data; _loading = false; _isOffline = false; });
     }, onError: (_) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          if (_exams.isEmpty) _isOffline = true;
+          else _isOffline = !ConnectivityService().isOnline.value;
+        });
+      }
     });
   }
 
@@ -1596,7 +1666,7 @@ class _ExamsTabState extends State<_ExamsTab> {
     return Column(
       children: [
         // Add button
-        Padding(
+        if (_canEditOnline) Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
           child: Row(
             children: [

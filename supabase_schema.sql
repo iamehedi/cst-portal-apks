@@ -467,3 +467,168 @@ CREATE POLICY "fcm_tokens_insert_all"
 CREATE POLICY "fcm_tokens_select_all"
   ON public.fcm_tokens FOR SELECT
   USING (true);
+
+
+-- ══════════════════════════════════════════════════════════════
+--  11. BLE ATTENDANCE TABLES
+--  Stores BLE (Bluetooth Low Energy) attendance sessions and records
+--  that previously only existed in local SQLite.
+-- ══════════════════════════════════════════════════════════════
+
+-- ─── ble_sessions ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.ble_sessions (
+  id TEXT PRIMARY KEY,
+  subject TEXT NOT NULL,
+  semester INTEGER NOT NULL CHECK (semester BETWEEN 1 AND 8),
+  teacher_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  department TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ
+);
+
+ALTER TABLE public.ble_sessions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "ble_sessions_select" ON public.ble_sessions;
+DROP POLICY IF EXISTS "ble_sessions_insert" ON public.ble_sessions;
+DROP POLICY IF EXISTS "ble_sessions_update" ON public.ble_sessions;
+DROP POLICY IF EXISTS "ble_sessions_delete" ON public.ble_sessions;
+
+CREATE POLICY "ble_sessions_select" ON public.ble_sessions
+  FOR SELECT USING (
+    auth.uid() = teacher_id
+    OR public.get_my_profile_is_admin()
+  );
+
+CREATE POLICY "ble_sessions_insert" ON public.ble_sessions
+  FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+CREATE POLICY "ble_sessions_update" ON public.ble_sessions
+  FOR UPDATE USING (
+    auth.uid() = teacher_id
+    OR public.get_my_profile_is_admin()
+  );
+
+CREATE POLICY "ble_sessions_delete" ON public.ble_sessions
+  FOR DELETE USING (
+    auth.uid() = teacher_id
+    OR public.get_my_profile_is_admin()
+  );
+
+-- ─── ble_pending_attendance ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.ble_pending_attendance (
+  id BIGINT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES public.ble_sessions(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL,
+  student_name TEXT NOT NULL,
+  time TEXT NOT NULL,
+  rssi INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'present', 'rejected', 'disconnected')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (id, session_id)
+);
+
+ALTER TABLE public.ble_pending_attendance ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "ble_pending_select" ON public.ble_pending_attendance;
+DROP POLICY IF EXISTS "ble_pending_insert" ON public.ble_pending_attendance;
+DROP POLICY IF EXISTS "ble_pending_update" ON public.ble_pending_attendance;
+DROP POLICY IF EXISTS "ble_pending_delete" ON public.ble_pending_attendance;
+
+CREATE POLICY "ble_pending_select" ON public.ble_pending_attendance
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM public.ble_sessions
+      WHERE id = session_id AND (
+        teacher_id = auth.uid()
+        OR public.get_my_profile_is_admin()
+      )
+    )
+    OR student_id = auth.uid()::text
+  );
+
+CREATE POLICY "ble_pending_insert" ON public.ble_pending_attendance
+  FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+CREATE POLICY "ble_pending_update" ON public.ble_pending_attendance
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM public.ble_sessions
+      WHERE id = session_id AND (
+        teacher_id = auth.uid()
+        OR public.get_my_profile_is_admin()
+      )
+    )
+  );
+
+CREATE POLICY "ble_pending_delete" ON public.ble_pending_attendance
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.ble_sessions
+      WHERE id = session_id AND (
+        teacher_id = auth.uid()
+        OR public.get_my_profile_is_admin()
+      )
+    )
+  );
+
+-- ─── ble_final_attendance ───────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.ble_final_attendance (
+  student_id TEXT NOT NULL,
+  session_id TEXT NOT NULL REFERENCES public.ble_sessions(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'present' CHECK (status IN ('present', 'rejected')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (student_id, session_id)
+);
+
+ALTER TABLE public.ble_final_attendance ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "ble_final_select" ON public.ble_final_attendance;
+DROP POLICY IF EXISTS "ble_final_insert" ON public.ble_final_attendance;
+DROP POLICY IF EXISTS "ble_final_update" ON public.ble_final_attendance;
+DROP POLICY IF EXISTS "ble_final_delete" ON public.ble_final_attendance;
+
+CREATE POLICY "ble_final_select" ON public.ble_final_attendance
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM public.ble_sessions
+      WHERE id = session_id AND (
+        teacher_id = auth.uid()
+        OR public.get_my_profile_is_admin()
+      )
+    )
+    OR student_id = auth.uid()::text
+  );
+
+CREATE POLICY "ble_final_insert" ON public.ble_final_attendance
+  FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+CREATE POLICY "ble_final_update" ON public.ble_final_attendance
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM public.ble_sessions
+      WHERE id = session_id AND (
+        teacher_id = auth.uid()
+        OR public.get_my_profile_is_admin()
+      )
+    )
+  );
+
+CREATE POLICY "ble_final_delete" ON public.ble_final_attendance
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM public.ble_sessions
+      WHERE id = session_id AND (
+        teacher_id = auth.uid()
+        OR public.get_my_profile_is_admin()
+      )
+    )
+  );
+
+-- ─── Indexes ─────────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_ble_sessions_teacher ON public.ble_sessions(teacher_id);
+CREATE INDEX IF NOT EXISTS idx_ble_sessions_status ON public.ble_sessions(status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_ble_final_session ON public.ble_final_attendance(session_id);
+CREATE INDEX IF NOT EXISTS idx_ble_final_student ON public.ble_final_attendance(student_id);
+CREATE INDEX IF NOT EXISTS idx_ble_pending_session ON public.ble_pending_attendance(session_id);
+CREATE INDEX IF NOT EXISTS idx_ble_pending_student ON public.ble_pending_attendance(student_id);

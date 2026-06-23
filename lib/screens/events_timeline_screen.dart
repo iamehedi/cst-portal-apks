@@ -274,10 +274,6 @@ class _EventsTimelineScreenState extends State<EventsTimelineScreen> {
       ),
       body: Column(
         children: [
-          ConnectivityBanners(
-            isOffline: _isOffline,
-            onRefresh: () async => _subscribeAll(),
-          ),
           Expanded(
             child: RefreshIndicator(
               onRefresh: () async => _subscribeAll(),
